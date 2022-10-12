@@ -1,0 +1,97 @@
+pool:
+  vmImage: ubuntu-latest
+
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  - main
+
+schedules:
+  - cron: "0 */12 * * *"
+    always: true
+    displayName: Reset DNS Every 12 Hours
+    branches:
+      include:
+        - main
+
+name: 1.0.$(BuildID)
+
+variables:
+  - group: DNSControl
+  - name: GOPATH
+    value: '$(Agent.BuildDirectory)/gopath' # Go workspace path
+  - name: GOBIN
+    value: '$(GOPATH)/bin' # Go binaries path
+
+stages:
+  - stage: Build
+    jobs:
+      - job: check_and_preview
+        displayName: "Run DNSControl check and preview"
+        steps:
+          - script: |
+              echo '##vso[task.prependpath]$(GOBIN)'
+              echo '##vso[task.prependpath]$(GOROOT)/bin'
+          - task: GoTool@0
+            inputs:
+              version: '1.18.4'
+          - task: Cache@2
+            inputs:
+              key: 'go | "$(Agent.OS)" | gopath | dnscontrol'
+              path: '$(GOBIN)'
+              cacheHitVar: 'DNSCONTROL_CACHE_RESTORED'
+          - task: Go@0
+            condition: ne(variables.DNSCONTROL_CACHE_RESTORED, 'true')
+            inputs:
+              command: 'custom'
+              customCommand: 'install'
+              arguments: 'github.com/StackExchange/dnscontrol/v3@v3.17.0'
+          - bash:  dnscontrol check
+            displayName: 'Run DNSControl Check'
+          - bash: dnscontrol check-creds cloudflare.com CLOUDFLAREAPI
+            displayName: "Run DNSControl Check CLOUDFLARE Creds"
+            env:
+              CLOUDFLARE_API_TOKEN: $(CLOUDFLARE_API_TOKEN)
+          - bash: dnscontrol preview
+            displayName: Run DNSControl Preview
+            env:
+              CLOUDFLARE_API_TOKEN: $(CLOUDFLARE_API_TOKEN)
+
+  - stage: Release
+    dependsOn: build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployProduction
+        displayName: "Update DNS"
+        environment: Prod
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  persistCredentials: true
+                  clean: true
+                - script: |
+                    echo '##vso[task.prependpath]$(GOBIN)'
+                    echo '##vso[task.prependpath]$(GOROOT)/bin'
+                - task: GoTool@0
+                  inputs:
+                    version: '1.18.4'
+                - task: Cache@2
+                  inputs:
+                    key: 'go | "$(Agent.OS)" | gopath | dnscontrol'
+                    path: '$(GOBIN)'
+                    cacheHitVar: 'DNSCONTROL_CACHE_RESTORED'
+                - task: Go@0
+                  condition: ne(variables.DNSCONTROL_CACHE_RESTORED, 'true')
+                  inputs:
+                    command: 'custom'
+                    customCommand: 'install'
+                    arguments: 'github.com/StackExchange/dnscontrol/v3@v3.17.0'
+                - bash: dnscontrol push
+                  displayName: Run DNSControl push
+                  env:
+                    CLOUDFLARE_API_TOKEN: $(CLOUDFLARE_API_TOKEN)
